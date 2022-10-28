@@ -8,11 +8,22 @@ spec:
   containers:
     - image: david13356/otel-example:latest
       name: app
+      imagePullPolicy: Always
       env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "opentelemetrycollector:4317"
         - name: RETURN_ERROR
-          value: "true"
+          value: "false"
+        - name: PORT
+          value: "8080"
+        - name: MONGO_URI
+          value: "mongodb://root:root@mongodb:27017"
+      readinessProbe:
+        httpGet:
+          path: /readiness
+          port: 8080
+        initialDelaySeconds: 5
+        periodSeconds: 5
 
 ---
 apiVersion: v1

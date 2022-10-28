@@ -1,18 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
+	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"app/controller"
+	"app/db"
 
+	"github.com/gorilla/mux"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
@@ -23,7 +27,8 @@ import (
 
 var (
 	OtelExporterOTLPEndpoint = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	ReturnError 			= os.Getenv("RETURN_ERROR")
+	Port 					= os.Getenv("PORT")
+	
 )
 
 func initTracer() (*sdktrace.TracerProvider, error) {
@@ -37,15 +42,19 @@ func initTracer() (*sdktrace.TracerProvider, error) {
 
 	
 	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithSpanProcessor(batch),
-		sdktrace.WithResource(resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceNameKey.String("ExampleService"))),
+		sdktrace.WithResource(resource.NewWithAttributes(semconv.SchemaURL,semconv.ServiceNameKey.String("APP"))),
 	)
+
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return tp, nil
 }
 
 func main() {
+
+	rand.Seed(time.Now().UnixNano())
 	tp, err := initTracer()
 	if err != nil {
 		log.Fatal(err)
@@ -56,13 +65,44 @@ func main() {
 		}
 	}()
 
-
-	otelHandler := otelhttp.NewHandler(http.HandlerFunc(HelloHandler), "HelloTracer")
-
-	http.Handle("/hello", otelHandler)
+	r := mux.NewRouter()
 	
+	rGet := r.Methods(http.MethodGet).Subrouter()
+	rGet.Use(otelmux.Middleware("server"))
+	rGet.HandleFunc("/facts", controller.UselessFactsHandler)
+
+	rHelper := r.Methods(http.MethodGet).Subrouter()
+	rHelper.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.Copy(w, bytes.NewBuffer([]byte("OK")))
+	})
+	rHelper.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+
+
+		err := db.PingDB()
+		if err != nil {
+			log.Println(err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		io.Copy(w, bytes.NewBuffer([]byte("OK")))
+	})
+
+	if Port == "" {
+		Port = "8080"
+	}
+
+	server := &http.Server{
+		Addr:    ":"+Port,
+		Handler: r,
+		ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
 	go func() {
-		err = http.ListenAndServe(":8080", nil)
+		err = server.ListenAndServe()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -76,76 +116,4 @@ func main() {
 
 	log.Println("Shutting down server...")
 
-}
-
-func HelloHandler(w http.ResponseWriter, req *http.Request) {
-
-	ctx := req.Context()
-
-	time.Sleep(1 * time.Second)
-
-	message, err := GenerateRandomMessage(ctx)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if ReturnError == "true" {
-		http.Error(w, "Error", http.StatusInternalServerError)
-		return
-	}
-
-	fmt.Fprintf(w, "%s", message)
-
-
-}
-
-type UserInfoResponse struct {
-	Results []struct {
-		Gender string `json:"gender"`
-		Name   struct {
-			Title string `json:"title"`
-			First string `json:"first"`
-			Last  string `json:"last"`
-		} `json:"name"`
-	} `json:"results"`
-}
-
-func GenerateRandomMessage(ctx context.Context) (string, error) {
-
-	sctx,span := otel.GetTracerProvider().Tracer("HelloTracer").Start(ctx, "ReturnMessageTracer")
-	defer span.End()
-	
-	span.AddEvent("ReturnMessage called")
-
-	userInfo, err := getRandomUserInfo(sctx)
-	if err != nil {
-		return "", err
-	}
-
-	message := "Hello " + userInfo.Results[0].Name.Title + " " + userInfo.Results[0].Name.First + " " + userInfo.Results[0].Name.Last
-
-	time.Sleep(1 * time.Second)
-
-	span.AddEvent("ReturnMessage finished")
-
-
-	return message, nil
-}
-
-func getRandomUserInfo(ctx context.Context) (UserInfoResponse, error) {
-	var userInfo UserInfoResponse
-
-	resp, err := otelhttp.Get(ctx,"https://randomuser.me/api/")
-	if err != nil {
-		return userInfo, err
-	}
-	defer resp.Body.Close()
-
-	err = json.NewDecoder(resp.Body).Decode(&userInfo)
-	if err != nil {
-		return userInfo, err
-	}
-
-	return userInfo, nil
 }
