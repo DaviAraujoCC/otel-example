@@ -9,15 +9,23 @@ data:
         protocols: 
           grpc:
     processors:
+      batch:
+        send_batch_max_size: 1000
+        send_batch_size: 100
+        timeout: 10s
     exporters:
       zipkin:
         endpoint: "http://zipkin:9411/api/v2/spans"
+      datadog:
+        api:
+          site: datadoghq.com
+          key: ${DD_API_KEY}
     service:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: []
-          exporters: [zipkin]
+          processors: [batch]
+          exporters: [zipkin,datadog]
 
 ---
 apiVersion: apps/v1
@@ -38,7 +46,7 @@ spec:
         - name: otelcol
           args:
             - --config=/conf/collector.yaml
-          image: otel/opentelemetry-collector:latest
+          image: otel/opentelemetry-collector-contrib:latest
           volumeMounts:
             - mountPath: /conf
               name: collector-config
